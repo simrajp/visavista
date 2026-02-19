@@ -673,32 +673,45 @@ elif page == "💰 Payments":
                     st.rerun()
 
     with tab2:
-        payments = run_query("""
-            SELECT p.id, p.payment_date, c.case_ref, cl.full_name as client,
-                   p.amount, p.method, s.name as received_by, p.notes, p.proof_image
-            FROM payments p
-            LEFT JOIN cases c ON p.case_id = c.id
-            LEFT JOIN clients cl ON c.client_id = cl.id
-            LEFT JOIN staff s ON p.received_by = s.id
-            ORDER BY p.created_at DESC
-        """)
+        try:
+            payments = run_query("""
+                SELECT p.id, p.payment_date, c.case_ref, cl.full_name as client,
+                       p.amount, p.method, s.name as received_by, p.notes, p.proof_image
+                FROM payments p
+                LEFT JOIN cases c ON p.case_id = c.id
+                LEFT JOIN clients cl ON c.client_id = cl.id
+                LEFT JOIN staff s ON p.received_by = s.id
+                ORDER BY p.created_at DESC
+            """)
+            has_proof_col = True
+        except:
+            payments = run_query("""
+                SELECT p.id, p.payment_date, c.case_ref, cl.full_name as client,
+                       p.amount, p.method, s.name as received_by, p.notes
+                FROM payments p
+                LEFT JOIN cases c ON p.case_id = c.id
+                LEFT JOIN clients cl ON c.client_id = cl.id
+                LEFT JOIN staff s ON p.received_by = s.id
+                ORDER BY p.created_at DESC
+            """)
+            has_proof_col = False
+
         if not payments.empty:
             st.metric("Total Collected", f"£{payments['amount'].sum():,.0f}")
-            # show table without the proof column
             st.dataframe(payments[['payment_date', 'case_ref', 'client', 'amount', 'method', 'received_by', 'notes']],
                          use_container_width=True, hide_index=True)
 
-            # show proof images below
-            proofs = payments[payments['proof_image'].notna() & (payments['proof_image'] != '')]
-            if not proofs.empty:
-                st.subheader("📎 Payment Proofs")
-                for _, p in proofs.iterrows():
-                    with st.expander(f"{p['case_ref']} — {p['client']} — £{p['amount']:.0f} on {p['payment_date']}"):
-                        try:
-                            img_bytes = base64.b64decode(p['proof_image'])
-                            st.image(img_bytes, caption=f"Proof for £{p['amount']:.0f}", use_container_width=True)
-                        except:
-                            st.warning("Could not display proof image.")
+            if has_proof_col and 'proof_image' in payments.columns:
+                proofs = payments[payments['proof_image'].notna() & (payments['proof_image'] != '')]
+                if not proofs.empty:
+                    st.subheader("📎 Payment Proofs")
+                    for _, p in proofs.iterrows():
+                        with st.expander(f"{p['case_ref']} — {p['client']} — £{p['amount']:.0f} on {p['payment_date']}"):
+                            try:
+                                img_bytes = base64.b64decode(p['proof_image'])
+                                st.image(img_bytes, caption=f"Proof for £{p['amount']:.0f}", use_container_width=True)
+                            except:
+                                st.warning("Could not display proof image.")
         else:
             st.info("No payments recorded yet.")
 
