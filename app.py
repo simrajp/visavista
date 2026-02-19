@@ -1,11 +1,13 @@
 import streamlit as st
-import sqlite3
+import libsql_experimental as libsql
 import pandas as pd
 from datetime import datetime, date, timedelta
 
 # ── Config ──
 st.set_page_config(page_title="Visa CRM", page_icon="🌍", layout="wide")
-DB = "visa_crm.db"
+
+TURSO_URL = st.secrets["TURSO_URL"]
+TURSO_TOKEN = st.secrets["TURSO_TOKEN"]
 
 VISA_TYPES = ["Tourist", "Work", "Student", "Business", "Family", "Transit"]
 COUNTRIES = ["UK", "USA", "Canada", "Schengen", "Australia", "UAE", "Other"]
@@ -16,8 +18,8 @@ MIN_FEE = 150.0
 
 # ── Database ──
 def get_db():
-    conn = sqlite3.connect(DB)
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = libsql.connect("visa_crm.db", sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.sync()
     return conn
 
 def init_db():
@@ -76,17 +78,8 @@ def init_db():
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    for col_def in [
-        ("appointment_date", "TEXT"), ("docs_handed", "INTEGER DEFAULT 0"),
-        ("docs_handed_at", "TEXT"), ("docs_handed_by", "INTEGER"),
-        ("fee_override_reason", "TEXT")
-    ]:
-        try:
-            c.execute(f"ALTER TABLE cases ADD COLUMN {col_def[0]} {col_def[1]}")
-        except:
-            pass
     conn.commit()
-    conn.close()
+    conn.sync()
 
 init_db()
 
@@ -94,13 +87,16 @@ init_db()
 def run_query(query, params=(), fetch=True):
     conn = get_db()
     if fetch:
-        df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        c = conn.cursor()
+        c.execute(query, params)
+        rows = c.fetchall()
+        cols = [d[0] for d in c.description] if c.description else []
+        df = pd.DataFrame(rows, columns=cols) if cols else pd.DataFrame()
         return df
     else:
         conn.execute(query, params)
         conn.commit()
-        conn.close()
+        conn.sync()
 
 def get_next_case_ref():
     yr = datetime.now().year
@@ -166,7 +162,6 @@ else:
     current_user = "Admin"
     st.sidebar.info("Add staff in Settings first")
 
-# ── Sidebar alerts ──
 upcoming = get_upcoming_appointments()
 if not upcoming.empty:
     st.sidebar.divider()
@@ -198,7 +193,7 @@ page = st.sidebar.radio("Navigate", [
 ])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ➕ NEW CASE (first in nav for prominence)
+# ➕ NEW CASE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if page == "➕ New Case":
     st.title("➕ New Case")
@@ -211,13 +206,11 @@ if page == "➕ New Case":
         st.info("Focus on preparing these clients. New cases can be created after.")
         st.stop()
 
-    # ── Step 1: Check for existing client ──
     st.subheader("1. Check Existing Client")
     lookup_name = st.text_input("Enter client name to check for duplicates", key="lookup_name")
 
     existing_client_id = None
     use_existing = False
-    name_matches = pd.DataFrame()
 
     if lookup_name and len(lookup_name.strip()) > 1:
         name_matches = run_query("SELECT id, full_name, phone, email, passport_number FROM clients WHERE LOWER(full_name) = LOWER(?)", (lookup_name.strip(),))
@@ -245,9 +238,8 @@ if page == "➕ New Case":
                 if link_choice == "Create a new case for this existing client":
                     use_existing = True
         else:
-            st.success("✅ No existing client found with this name — new client will be created.")
+            st.success("✅ No existing client found — new client will be created.")
 
-    # ── Step 2: Case creation form (all inside a single form to prevent reruns) ──
     st.subheader("2. Client & Visa Details")
 
     with st.form("new_case_form", clear_on_submit=True):
@@ -291,7 +283,6 @@ if page == "➕ New Case":
         elif 0 < total_fee < MIN_FEE and not fee_override_reason.strip():
             st.error(f"❌ Fee below £{MIN_FEE:.0f} — override reason required.")
         else:
-            # check passport uniqueness
             create_ok = True
             passport_exists = run_query("SELECT id, full_name FROM clients WHERE UPPER(passport_number) = UPPER(?)", (passport.strip(),))
 
@@ -329,7 +320,7 @@ if page == "➕ New Case":
                               (case_id, deposit, "Cash", sp_id, now, "Initial deposit"))
 
                 conn.commit()
-                conn.close()
+                conn.sync()
                 override_note = f" [FEE OVERRIDE: {override}]" if override else ""
                 log_activity(case_id, "CASE_CREATED", f"Created by {current_user}, fee: £{total_fee}{override_note}", current_user)
                 st.success(f"✅ Case **{case_ref}** created for **{name}**!")
@@ -343,7 +334,7 @@ elif page == "📊 Dashboard":
 
     cases = run_query("SELECT * FROM cases")
     if cases.empty:
-        st.info("No cases yet — hit ➕ New Case in the sidebar to get started!")
+        st.info("No cases yet — hit ➕ New Case to get started!")
     else:
         total_fees = cases['total_fee'].sum()
         total_paid = run_query("SELECT COALESCE(SUM(amount),0) as s FROM payments")['s'].iloc[0]
@@ -353,7 +344,6 @@ elif page == "📊 Dashboard":
         c3.metric("Collected", f"£{total_paid:,.0f}")
         c4.metric("Outstanding", f"£{total_fees - total_paid:,.0f}")
 
-        # ── Sales Performance ──
         st.subheader("📈 Sales Performance")
         sales_data = run_query("""
             SELECT s.name as salesperson,
@@ -383,14 +373,12 @@ elif page == "📊 Dashboard":
                 display_df.columns = ['Salesperson', 'Cases', 'Revenue (£)', 'Collected (£)', 'Rate']
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # ── Pipeline ──
         st.subheader("Pipeline")
         status_counts = cases['status'].value_counts().reindex(STATUSES, fill_value=0)
         cols = st.columns(len(STATUSES))
         for i, s in enumerate(STATUSES):
             cols[i].metric(f"{STATUS_COLORS.get(s,'')} {s.replace('_',' ').title()}", int(status_counts.get(s, 0)))
 
-        # ── Appointment alerts ──
         if not upcoming.empty:
             st.subheader("📅 Upcoming Appointments")
             today = date.today()
@@ -408,15 +396,13 @@ elif page == "📊 Dashboard":
                 else:
                     st.warning(f"🟡 **In 3 days** — {msg}")
 
-        # ── Idle cases ──
         if not idle.empty:
             st.subheader("🔔 Idle Cases — Update Required")
-            st.caption("Cases with no progress for 2+ days. Every client must be actively worked on.")
+            st.caption("Cases with no progress for 2+ days.")
             for _, row in idle.iterrows():
                 urgency = "🔴" if row['days_idle'] >= 5 else "🟠" if row['days_idle'] >= 3 else "🟡"
                 st.warning(f"{urgency} **{row['case_ref']}** — {row['client']} — **{row['status']}** for **{row['days_idle']} days** — {row['salesperson']} — 📞 {row['phone']}")
 
-        # ── Other alerts ──
         st.subheader("⚠️ Other Alerts")
         alert_count = 0
         for _, case in cases.iterrows():
@@ -428,7 +414,6 @@ elif page == "📊 Dashboard":
         if alert_count == 0:
             st.success("All clear — no outstanding issues.")
 
-        # ── Recent cases ──
         st.subheader("Recent Cases")
         recent = run_query("""
             SELECT c.case_ref, cl.full_name as client, c.visa_type, c.destination,
@@ -493,7 +478,6 @@ elif page == "📁 Cases":
             else:
                 col3.metric("Balance Due", "£0 ✅")
 
-            # ── Idle warning ──
             if case['updated_at']:
                 try:
                     last_update = datetime.strptime(case['updated_at'], "%Y-%m-%d %H:%M:%S")
@@ -505,7 +489,6 @@ elif page == "📁 Cases":
 
             st.divider()
 
-            # ── Appointment ──
             st.subheader("📅 Appointment")
             current_apt = case['appointment_date'] if case['appointment_date'] else None
 
@@ -542,7 +525,6 @@ elif page == "📁 Cases":
 
             st.divider()
 
-            # ── Document Handover ──
             st.subheader("📄 Document Handover")
             if case['docs_handed']:
                 st.success(f"✅ **All documents handed** on {case['docs_handed_at']} by **{case['docs_handed_by_name']}**")
@@ -568,7 +550,6 @@ elif page == "📁 Cases":
 
             st.divider()
 
-            # ── Update Status ──
             st.subheader("🔄 Update Status")
             current_idx = STATUSES.index(case['status']) if case['status'] in STATUSES else 0
             with st.form("status_form"):
@@ -587,7 +568,6 @@ elif page == "📁 Cases":
 
             st.divider()
 
-            # ── Delete Case ──
             st.subheader("🗑️ Delete Case")
             with st.expander("Delete this case permanently"):
                 st.warning("This action cannot be undone.")
@@ -608,7 +588,6 @@ elif page == "📁 Cases":
 
             st.divider()
 
-            # ── Activity Log ──
             st.subheader("📋 Activity Log")
             logs = run_query("SELECT timestamp, action, details, performed_by FROM activity_log WHERE case_id=? ORDER BY timestamp DESC LIMIT 20", (case_id,))
             if not logs.empty:
