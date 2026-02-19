@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 
 # ── Config ──
-st.set_page_config(page_title="Visa CRM", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Visa Vista CRM", page_icon="🌍", layout="wide")
 
 TURSO_URL = st.secrets["TURSO_URL"]
 TURSO_TOKEN = st.secrets["TURSO_TOKEN"]
@@ -18,9 +18,16 @@ MIN_FEE = 150.0
 
 # ── Database ──
 def get_db():
-    conn = libsql.connect("visa_crm.db", sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
+    if 'db_conn' not in st.session_state:
+        conn = libsql.connect("visa_crm.db", sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.sync()
+        st.session_state['db_conn'] = conn
+    return st.session_state['db_conn']
+
+def sync_db():
+    """Call this after any write operation"""
+    conn = get_db()
     conn.sync()
-    return conn
 
 def init_db():
     conn = get_db()
@@ -79,7 +86,7 @@ def init_db():
         );
     """)
     conn.commit()
-    conn.sync()
+    sync_db()
 
 init_db()
 
@@ -96,7 +103,7 @@ def run_query(query, params=(), fetch=True):
     else:
         conn.execute(query, params)
         conn.commit()
-        conn.sync()
+        sync_db()
 
 def get_next_case_ref():
     yr = datetime.now().year
@@ -154,7 +161,7 @@ def get_idle_cases():
     """)
 
 # ── Sidebar ──
-st.sidebar.title("🌍 Visa CRM")
+st.sidebar.title("🌍 Visa Vista CRM")
 staff_names = get_staff_list()
 if staff_names:
     current_user = st.sidebar.selectbox("Logged in as", list(staff_names.keys()))
@@ -320,7 +327,7 @@ if page == "➕ New Case":
                               (case_id, deposit, "Cash", sp_id, now, "Initial deposit"))
 
                 conn.commit()
-                conn.sync()
+                sync_db()
                 override_note = f" [FEE OVERRIDE: {override}]" if override else ""
                 log_activity(case_id, "CASE_CREATED", f"Created by {current_user}, fee: £{total_fee}{override_note}", current_user)
                 st.success(f"✅ Case **{case_ref}** created for **{name}**!")
