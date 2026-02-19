@@ -1,6 +1,7 @@
 import streamlit as st
 import libsql_experimental as libsql
 import pandas as pd
+import base64
 from datetime import datetime, date, timedelta
 
 # ── Config ──
@@ -73,6 +74,7 @@ def init_db():
             method TEXT,
             received_by INTEGER REFERENCES staff(id),
             payment_date TEXT,
+            proof_image TEXT,
             notes TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
@@ -265,6 +267,7 @@ if page == "➕ New Case":
         salesperson = col4.selectbox("Salesperson", list(staff_names.keys()) if staff_names else ["No staff - add in Settings"])
         notes = st.text_area("Notes")
         deposit = st.number_input("Initial Deposit (£, leave 0 if none)", min_value=0.0, step=50.0)
+        deposit_proof = st.file_uploader("Upload deposit proof (screenshot)", type=["png", "jpg", "jpeg"], key="deposit_proof")
 
         fee_override_reason = ""
         if 0 < total_fee < MIN_FEE:
@@ -323,8 +326,11 @@ if page == "➕ New Case":
                 case_id = c.lastrowid
 
                 if deposit > 0:
-                    c.execute("INSERT INTO payments (case_id, amount, method, received_by, payment_date, notes) VALUES (?,?,?,?,?,?)",
-                              (case_id, deposit, "Cash", sp_id, now, "Initial deposit"))
+                    proof_b64 = None
+                    if deposit_proof:
+                        proof_b64 = base64.b64encode(deposit_proof.read()).decode('utf-8')
+                    c.execute("INSERT INTO payments (case_id, amount, method, received_by, payment_date, proof_image, notes) VALUES (?,?,?,?,?,?,?)",
+                              (case_id, deposit, "Cash", sp_id, now, proof_b64, "Initial deposit"))
 
                 conn.commit()
                 sync_db()
@@ -645,9 +651,13 @@ elif page == "💰 Payments":
                 method = col2.selectbox("Method", PAYMENT_METHODS)
                 pay_date = col1.date_input("Date", value=date.today())
                 pay_notes = st.text_input("Notes")
+                pay_proof = st.file_uploader("Upload payment proof (screenshot)", type=["png", "jpg", "jpeg"], key="pay_proof")
                 if st.form_submit_button("Record Payment", type="primary"):
-                    run_query("INSERT INTO payments (case_id, amount, method, received_by, payment_date, notes) VALUES (?,?,?,?,?,?)",
-                              (case_id, amount, method, staff_names.get(current_user), pay_date.isoformat(), pay_notes), fetch=False)
+                    proof_b64 = None
+                    if pay_proof:
+                        proof_b64 = base64.b64encode(pay_proof.read()).decode('utf-8')
+                    run_query("INSERT INTO payments (case_id, amount, method, received_by, payment_date, proof_image, notes) VALUES (?,?,?,?,?,?,?)",
+                              (case_id, amount, method, staff_names.get(current_user), pay_date.isoformat(), proof_b64, pay_notes), fetch=False)
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     new_bal = balance - amount
                     if new_bal <= 0:
@@ -664,8 +674,8 @@ elif page == "💰 Payments":
 
     with tab2:
         payments = run_query("""
-            SELECT p.payment_date, c.case_ref, cl.full_name as client,
-                   p.amount, p.method, s.name as received_by, p.notes
+            SELECT p.id, p.payment_date, c.case_ref, cl.full_name as client,
+                   p.amount, p.method, s.name as received_by, p.notes, p.proof_image
             FROM payments p
             LEFT JOIN cases c ON p.case_id = c.id
             LEFT JOIN clients cl ON c.client_id = cl.id
@@ -674,7 +684,21 @@ elif page == "💰 Payments":
         """)
         if not payments.empty:
             st.metric("Total Collected", f"£{payments['amount'].sum():,.0f}")
-            st.dataframe(payments, use_container_width=True, hide_index=True)
+            # show table without the proof column
+            st.dataframe(payments[['payment_date', 'case_ref', 'client', 'amount', 'method', 'received_by', 'notes']],
+                         use_container_width=True, hide_index=True)
+
+            # show proof images below
+            proofs = payments[payments['proof_image'].notna() & (payments['proof_image'] != '')]
+            if not proofs.empty:
+                st.subheader("📎 Payment Proofs")
+                for _, p in proofs.iterrows():
+                    with st.expander(f"{p['case_ref']} — {p['client']} — £{p['amount']:.0f} on {p['payment_date']}"):
+                        try:
+                            img_bytes = base64.b64decode(p['proof_image'])
+                            st.image(img_bytes, caption=f"Proof for £{p['amount']:.0f}", use_container_width=True)
+                        except:
+                            st.warning("Could not display proof image.")
         else:
             st.info("No payments recorded yet.")
 
